@@ -1,0 +1,12 @@
+torch
+transformers
+accelerate
+pandas
+numpy
+nltk
+seaborn
+matplotlib
+python-dotenv
+datasets
+requests
+scipy

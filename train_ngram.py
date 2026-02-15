@@ -6,92 +6,91 @@ from nltk.lm.preprocessing import padded_everygram_pipeline
 from nltk.lm import Laplace
 from nltk.tokenize import word_tokenize
 
-# 1. Setup NLTK
-try:
-    nltk.data.find('tokenizers/punkt')
-    nltk.data.find('tokenizers/punkt_tab')
-except LookupError:
-    nltk.download('punkt')
-    nltk.download('punkt_tab')
 
-DATA_DIR = "data"
-NGRAM_ORDER = 5  # 5-gram = predicts word based on previous 4
+def setup_nltk_resources():
+    """Verify and download required NLTK tokenization resources."""
+    try:
+        nltk.data.find('tokenizers/punkt')
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        nltk.download('punkt')
+        nltk.download('punkt_tab')
 
-# ---------------------------------------------------------
-# Step 1: Train the N-gram Model
-# ---------------------------------------------------------
-print(f"Training {NGRAM_ORDER}-gram model on WikiText-2...")
 
-try:
-    with open(os.path.join(DATA_DIR, "wikitext_train.txt"), "r", encoding="utf-8") as f:
-        text_data = f.read()
-except FileNotFoundError:
-    print("Error: 'wikitext_train.txt' not found.")
-    exit()
+def train_ngram_model(data_path, order):
+    """
+    Train a Laplace-smoothed N-gram model on text data.
+    Returns the trained language model and the processed vocabulary.
+    """
+    try:
+        with open(data_path, "r", encoding="utf-8") as f:
+            text_data = f.read()
+    except FileNotFoundError:
+        print(f"Error: {data_path} not found.")
+        exit()
 
-# Tokenize the text into sentences, then words
-sentences = nltk.sent_tokenize(text_data)
-tokenized_text = [word_tokenize(sent.lower()) for sent in sentences]
+    sentences = nltk.sent_tokenize(text_data)
+    tokenized_text = [word_tokenize(sent.lower()) for sent in sentences]
+    train_data, vocab = padded_everygram_pipeline(order, tokenized_text)
 
-# Preprocess for N-gram training
-train_data, vocab = padded_everygram_pipeline(NGRAM_ORDER, tokenized_text)
+    lm = Laplace(order)
+    lm.fit(train_data, vocab)
+    return lm
 
-# Initialize and Train
-lm = Laplace(NGRAM_ORDER)
-lm.fit(train_data, vocab)
 
-print(f"Model Trained. Vocab size: {len(lm.vocab)}")
+def calculate_surprisal(df, lm, order):
+    """
+    Calculate word-level surprisal scores based on the language model.
+    Resets context when a new item (story) is encountered.
+    """
+    surprisals = []
+    context = []
+    current_item = -1
 
-# ---------------------------------------------------------
-# Step 2: Calculate Surprisal on Natural Stories
-# ---------------------------------------------------------
-print("Calculating Surprisal on Natural Stories...")
+    for index, row in df.iterrows():
+        if row['item'] != current_item:
+            context = []
+            current_item = row['item']
 
-try:
-    df = pd.read_csv(os.path.join(DATA_DIR, "natural_stories_cleaned.csv"))
-except FileNotFoundError:
-    print("Error: 'natural_stories_cleaned.csv' not found.")
-    exit()
+        word = str(row['word']).lower()
+        relevant_context = tuple(context[-(order - 1):])
+        score = lm.score(word, relevant_context)
 
-surprisals = []
-context = []
+        # Convert probability to surprisal in bits
+        if score > 0:
+            surprisal = -np.log2(score)
+        else:
+            surprisal = 20.0
 
-# Reset context when story changes
-current_item = -1
+        surprisals.append(surprisal)
+        context.append(word)
 
-for index, row in df.iterrows():
-    # Check if we moved to a new story
-    if row['item'] != current_item:
-        context = []
-        current_item = row['item']
+        if index % 1000 == 0:
+            print(f"Processed {index}/{len(df)} words...", end='\r')
 
-    word = str(row['word']).lower()
+    return surprisals
 
-    # 1. Ask the model
-    relevant_context = tuple(context[-(NGRAM_ORDER - 1):])
-    score = lm.score(word, relevant_context)
 
-    # 2. Convert to Surprisal (bits): -log2(probability)
-    if score > 0:
-        surprisal = -np.log2(score)
-    else:
-        surprisal = 20.0
+if __name__ == "__main__":
+    setup_nltk_resources()
 
-    surprisals.append(surprisal)
+    DATA_DIR = "data"
+    NGRAM_ORDER = 5
+    TRAIN_FILE = os.path.join(DATA_DIR, "wikitext_train.txt")
+    TARGET_FILE = os.path.join(DATA_DIR, "natural_stories_cleaned.csv")
 
-    # 3. Update context
-    context.append(word)
+    print(f"Training {NGRAM_ORDER}-gram model...")
+    language_model = train_ngram_model(TRAIN_FILE, NGRAM_ORDER)
 
-    if index % 1000 == 0:
-        print(f"   Processed {index}/{len(df)} words...", end='\r')
+    print("Calculating Surprisal...")
+    try:
+        df_stories = pd.read_csv(TARGET_FILE)
+    except FileNotFoundError:
+        print(f"Error: {TARGET_FILE} not found.")
+        exit()
 
-# ---------------------------------------------------------
-# Step 3: Save Results
-# ---------------------------------------------------------
-df['ngram_surprisal'] = surprisals
+    df_stories['ngram_surprisal'] = calculate_surprisal(df_stories, language_model, NGRAM_ORDER)
 
-save_path = os.path.join(DATA_DIR, "natural_stories_phase2.csv")
-df.to_csv(save_path, index=False)
-
-print("\nPhase 2 Complete.")
-print(f"Saved new dataset with N-gram scores to: {save_path}")
+    save_path = os.path.join(DATA_DIR, "natural_stories_phase2.csv")
+    df_stories.to_csv(save_path, index=False)
+    print(f"\nPhase 2 Complete. Results saved to: {save_path}")
